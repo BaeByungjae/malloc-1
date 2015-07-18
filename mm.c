@@ -46,9 +46,17 @@
 #define NEXT_BLKP(bp)  ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE))) //line:vm:mm:nextblkp
 #define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) //line:vm:mm:prevblkp
 
-/* Given heap base address hp, conversions between 64-bit pointer and 32-bit unsigned int */
-#define PTOI(hp, p) ((unsigned int)(p - hp))
-#define ITOP(hp, val) ((char *)val + hp)
+// /* Given heap base address hp, conversions between 64/32-bit data */
+// #define PTOI(hp, p) ((unsigned int)(p - hp))
+// #define ITOP(hp, val) ((char *)(val) + hp)
+
+// /* Given a free block ptr bp, compute 32-bit val of prev/next free block */
+// #define NEXT_FREE_VAL(bp) (GET(bp))
+// #define PREV_FREE_VAL(bp) (GET((char *)bp + WSIZE))
+
+// /* Given a free block ptr bp, put prev/next 32-bit val in it */
+// #define PUT_NEXT_VAL(bp, val) (PUT(bp, val))
+// #define PUT_PREV_VAL(bp, val) (PUT(((char *)(bp) + WSIZE), val))
 
 /* $end mallocmacros */
 
@@ -65,16 +73,29 @@ static void *extend_heap(size_t words);
 static void place(void *bp, size_t asize);
 static void *find_fit(size_t asize);
 static void *coalesce(void *bp);
+static void deleteFree(void *bp);
+static void insertFree(void *bp);
+/* Experimental helper function */
+static unsigned int ptoi(char * p);
+static char *itop(unsigned int p);
+static unsigned int next_free_val(void *bp);
+static unsigned int prev_free_val(void *bp);
+static void put_prev_val(void *bp, unsigned int p);
+static void put_next_val(void *bp, unsigned int p);
 
 /* 
  * mm_init - Initialize the memory manager 
+ * 1. start with 4-word structure (padding+proglogue+epilogue)
+ * 2. insert a free block with CHUNKSIZE
+ * 3. point the chunk to previous and next free blocks
+ * 4. initialize root and heap_base address
  */
 /* $begin mminit */
 int mm_init(void) 
 {
     /* Create the initial empty heap */
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1) //line:vm:mm:begininit
-	return -1;
+		return -1;
 	/* Get the heap base address */
 	heap_base = heap_listp;
     PUT(heap_listp, 0);                          /* Alignment padding */
@@ -91,10 +112,10 @@ int mm_init(void)
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL) 
-	return -1;
+		return -1;
 	
-	PUT(NEXT_BLKP(heap_listp), 0); /* next free block is NULL */
-	PUT(NEXT_BLKP(heap_listp)+WSIZE, 0); /* previous free block is NULL */
+	put_next_val(NEXT_BLKP(heap_listp), 0); /* next free block is NULL */
+	put_prev_val(NEXT_BLKP(heap_listp), 0); /* previous free block is NULL */
 	root = NEXT_BLKP(heap_listp); /* root points to 1st free block */
 
     return 0;
@@ -142,32 +163,35 @@ void *mm_malloc(size_t size)
 /* $end mmmalloc */
 
 /* 
- * free a block and coalesce with ajacent free blocks
- * place it in the beginning of the free list
+ * free an allocated block
+ * 1. coalesce with any ajacent free blocks
+ * 2. put it in the beginning of the free list
  */
 /* $begin mmfree */
 void mm_free(void *bp)
 {
 /* $end mmfree */
     if(bp == 0) 
-	return;
+		return;
 
 /* $begin mmfree */
     size_t size = GET_SIZE(HDRP(bp));
 /* $end mmfree */
-    if (heap_listp == 0){
-	mm_init();
-    }
+    if (heap_listp == 0)
+		mm_init();
+ 
 /* $begin mmfree */
-
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
-    coalesce(bp);
+
+	coalesce(bp);
 }
 
 /* $end mmfree */
 /*
  * coalesce - Boundary tag coalescing. Return ptr to coalesced block
+ * 1. coalesce with ajacent blocks
+ * 2. place the free'd and coalesce'd block in the beginning of free list
  */
 /* $begin mmfree */
 static void *coalesce(void *bp) 
@@ -177,28 +201,46 @@ static void *coalesce(void *bp)
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc) {            /* Case 1 */
-	return bp;
+    	/* inser to the list directly */
+    	insertFree(bp);
+    	return bp;
     }
 
     else if (prev_alloc && !next_alloc) {      /* Case 2 */
-	size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-	PUT(HDRP(bp), PACK(size, 0));
-	PUT(FTRP(bp), PACK(size,0));
+		size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+		/* delete the next free block from list */
+		deleteFree(NEXT_BLKP(bp));
+		/* coalesce with the next */
+		PUT(HDRP(bp), PACK(size, 0));
+		PUT(FTRP(bp), PACK(size, 0));
+		/* insert free block into the list */
+		insertFree(bp);
     }
 
     else if (!prev_alloc && next_alloc) {      /* Case 3 */
-	size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-	PUT(FTRP(bp), PACK(size, 0));
-	PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-	bp = PREV_BLKP(bp);
+		size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+		/* delete the previous free block from list */
+		deleteFree(PREV_BLKP(bp));
+		/* coalesce with the prev */
+		PUT(FTRP(bp), PACK(size, 0));
+		PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+		bp = PREV_BLKP(bp);
+		/* insert free block into the list */
+		insertFree(bp);
     }
 
     else {                                     /* Case 4 */
-	size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
-	    GET_SIZE(FTRP(NEXT_BLKP(bp)));
-	PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-	PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-	bp = PREV_BLKP(bp);
+		size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
+	        	GET_SIZE(FTRP(NEXT_BLKP(bp)));
+	    /* delete blocks in both sides */
+	    deleteFree(NEXT_BLKP(bp));
+	    deleteFree(PREV_BLKP(bp));
+	    /* coalesce with both sides */    	
+		PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+		PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+		bp = PREV_BLKP(bp);
+		/* insert free block into the list */
+		insertFree(bp);
     }
 /* $end mmfree */
 #ifdef NEXT_FIT
@@ -350,3 +392,66 @@ static void *find_fit(size_t asize)
 #endif
 }
 
+/*
+ * delete a free block from the list
+ */
+static void deleteFree(void *bp) {
+	size_t next_free = next_free_val(bp);
+	size_t prev_free = prev_free_val(bp);
+
+	/* delete next free block from the list */
+	if (prev_free) 
+		put_prev_val(itop(prev_free), next_free); 
+	if (next_free) 
+		put_prev_val(itop(next_free), prev_free);
+}
+
+/*
+ * insert a free block in the front of the list
+ */
+static void insertFree(void *bp) {
+	/* new 1st has NULL prev */ 
+	put_prev_val(bp, 0); 
+
+	/* redirect the old 1st only when it was not coalesced */
+	if ((root < (char *)bp) || (root >= NEXT_BLKP(bp))) {
+		/* new 1st's next is the old 1st */
+		put_next_val(bp, ptoi(root));
+		/* old 1st's prev is the new 1st */ 
+		put_prev_val(root, ptoi(bp));
+	}
+	else {
+		/* new 1st's next is the old 1st's next */
+		put_next_val(bp, next_free_val(root));
+		/* old 1st's next's prev is the new 1st */
+		put_prev_val(itop(next_free_val(root)), ptoi(bp));
+	}
+	/* root points to 1st free block */
+	root = bp; 
+}
+
+/* convert a 64-bit ptr value to a 32-bit unsigned int value */
+static unsigned int ptoi(char *p) {
+	return (unsigned int)(p-heap_base);
+}
+
+/* convert a 32-bit unsigned int value back to 64-bit pointer */
+static char *itop(unsigned int p) {
+	return (char *)((long int)(p) + (long int)(heap_base));
+}
+/* given a free block ptr, get next block ptr 32-bit value */
+static unsigned int next_free_val(void *bp) {
+	return GET(bp); 
+}
+/* given a free block ptr, get prev block ptr 32-bit value */
+static unsigned int prev_free_val(void *bp) {
+	return GET(bp+WSIZE);
+}
+/* put a 32-bit value in a free block prev free block field */
+static void put_prev_val(void *bp, unsigned int p) {
+	PUT(bp+WSIZE, p);
+}
+/* put a 32-bit value in a free block next free block field */
+static void put_next_val(void *bp, unsigned int p) {
+	PUT(bp, p);
+}
