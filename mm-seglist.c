@@ -87,11 +87,15 @@
 #define NEXT_BLKP(bp)  ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
+/* Read and write a pointer at an address (64-bit) */
+#define GET_PTR(addr) ((void *)(*(long *)(addr)))
+#define PUT_PTR(addr, ptr) (*(long *)(addr) = (long)ptr)
+
 /* Global variables */
-static char *heap_listp = 0;
-static char *free_lists_base = 0;
-static char *free_lists_end = 0;
-static char *free_lists_pwr2_base = 0;
+static void *heap_listp = 0;
+static void *free_lists_base = 0;
+static void *free_lists_end = 0;
+static void *free_lists_pwr2_base = 0;
 
 /* Function prototypes for internal helper routines */
 static void *extend_heap(size_t words);
@@ -104,6 +108,7 @@ static void *hashBlkSize(size_t asize);
 /* Internal routines for pointer arithmitic */
 static unsigned int ptoi(void *bp);
 static void *itop(unsigned int bpi);
+static void *get_prev_free_bp(void *bp);
 static void *get_next_free_bp(void *bp);
 static size_t countOne(size_t n);
 
@@ -116,7 +121,7 @@ int mm_init(void) {
 
 	/* Create the initial empty free lists */
 	free_lists_base = mem_heap_lo();
-	if ((heap_listp = mem_sbrk(NUM_SIZES*DSIZE+3*WSIZE)) == (void *)-1)
+	if ((heap_listp = mem_sbrk(NUM_SIZES*DSIZE+4*WSIZE)) == (void *)-1)
 		return -1;
 	/* Initialize all list pointers to NULL */
 	for (i = 0; i < NUM_SIZES; i++) {
@@ -139,6 +144,8 @@ int mm_init(void) {
  * malloc
  */
 void *malloc (size_t size) {
+	// size_t asize; /* Adjusted block size */
+	// size_t extendsize; /* Amount to extend heap if no fit found */
 	size = size;
 	extend_heap(0);
 	find_fit(0);
@@ -272,19 +279,51 @@ static void *coalesce(void *bp) {
 
 /*
  * delete free block from lists
+ * 1. bp's prev (if exists) points to its next
+ * 2. bp's next (if exists) points to its prev
+ * 3. change the list head to bp's next if bp is the head
  */
 static void deleteBlk(void *bp) {
-	bp = bp;
-	ptoi(bp);
+	unsigned int prev = GET(bp);
+	unsigned int next = GET(bp+WSIZE);
+	void *array_ptr = 0;
+
+	if (prev)
+		PUT(get_prev_free_bp(bp)+WSIZE, next); /* prev points to bp's next */
+	/* bp is the head of this list */	
+	else {
+		/* get addr in the array of ptrs to lists */
+		array_ptr = hashBlkSize(GET_SIZE(HDRP(bp)));
+		/* set the ptr to lists to bp's next */ 
+		PUT_PTR(array_ptr, itop(next));
+	}
+	if (next)
+		PUT(get_next_free_bp(bp), prev); /* next points to bp's prev */
 	return;
 }
 
 /*
- * insert free block into lists
+ * insert free block into appropriate lists
+ * 1. hash size to get addr in the array of ptrs to lists
+ * 2. insert the free block in the front of appropriate list
  */
 static void insertBlk(void *bp) {
-	bp = bp;
-	return;
+	void *array_ptr;
+	void *head_bp;
+
+	array_ptr = hashBlkSize(GET_SIZE(HDRP(bp)));
+	/* at least one free block already in the list */
+	if ((head_bp = GET_PTR(array_ptr))) {
+		PUT(bp, 0); /* set bp's prev */
+		PUT(bp+WSIZE, ptoi(head_bp)); /* set bp's next */
+		PUT(head_bp, ptoi(bp)); /* set old head's prev */
+	}
+	/* the list is empty */
+	else {
+		PUT(bp, 0); /* set bp's prev */
+		PUT(bp+WSIZE, 0); /* set bp's next */
+	}
+	PUT_PTR(array_ptr, bp); /* reset the head to be bp */ 
 }  
 
 /*
@@ -294,12 +333,13 @@ static void insertBlk(void *bp) {
  * 3. repeate until a fit or exhaust all lists without a fit
  */
 static void *find_fit(size_t asize) {
-	char *fb_head, *bp;
+	void *bp;
+	void *array_ptr;
 
-	fb_head = hashBlkSize(asize);
+	array_ptr = hashBlkSize(asize);
 
-	for (; fb_head < free_lists_end; fb_head+=DSIZE) {
-		bp = fb_head;
+	for (; array_ptr < free_lists_end; array_ptr+=DSIZE) {
+		bp = GET_PTR(array_ptr);
 		while (bp) {
 			if (GET_SIZE(HDRP(bp)) >= asize)
 				return bp;
@@ -320,7 +360,7 @@ static void place(void *bp, size_t asize) {
 
 /*
  * hashes the requested size to appropriate list
- * return a pointer to the 1st free block of the appropriate list
+ * return an address storing 1st free block of the appropriate list
  */
 static void *hashBlkSize(size_t asize) {
  	size_t words = asize / WSIZE;
@@ -339,7 +379,7 @@ static size_t countOne(size_t n) {
 		count++;
 		if (count == (PWR2_SIZES-1))
 			break;
-		n = (n >> 1);
+		n >>= 1;
 	}
 	return count;
 }
@@ -354,6 +394,10 @@ static unsigned int ptoi(void *bp) {
 
 static void *itop(unsigned int bpi) {
 	return bpi? ((void *)((long)(bpi)) + (long)(mem_heap_lo())) : NULL;
+}
+
+static void *get_prev_free_bp(void *bp) {
+	return itop(GET(bp));
 }
 
 static void *get_next_free_bp(void *bp) {
