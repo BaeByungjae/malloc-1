@@ -4,22 +4,25 @@
  * Zhexin Qiu id: zhexinq
  * 
  * Allocator implemented based on segregated fits.
- * Block format: one word for size and alloc state, one 
- * word for bondary tag coalescing. Free blocks have double
- * pointers to prev/next free blocks. Store 8-byte pointers 
- * as 4-byte unsigned int using the fact that heap address 
- * space is less than 32-bit. Minimum block size 16 bytes.
+ * 
+ * Block format: 
+ * allocated block: [header][payload] minimum: 16 bytes 
+ * free block: [header][prev][next][footer] minimum: 16 bytes
+ * header: size + prev alloc state bit + alloc state bit
+ *
  * Free policy: LIFO, free'd and coalesced block 
  * inserted to front of appropriate list.
+ *
  * Allocation policy: first-search on appropriate list,
  * if found, split and insert the remainder to appropriate
  * list. Repeat on larger size class if not found. If no
  * fits on all size classes, request heap memory from OS,
- * coalesced with any previous free block, allocate
+ * coalesce with any previous free block, allocate
  * requested block out of this new block, and put remainder
  * into appropriate size class.
- * Size classes (in bytes):
- * [2^4], [2^5], [2^6], ... [2^20, inf]
+ *
+ * Size classes (orgnized by free block size in bytes):
+ * [2^4~2^5), [2^5~2^6), ..., [2^19~2^20), [2^20, inf]
  */
 #include <assert.h>
 #include <stdio.h>
@@ -61,11 +64,17 @@
 #define CHUNKSIZE  (1<<12)  /* Extend heap by this amount (bytes) */
 #define MIN_BLK_SIZE 16 /* minimum block size (bytes) */ 
 #define NUM_SIZES 17 /* number of size classes */
+#define MIN_PWR 4 /* power of 2 for the minimum size class */
+#define MAX_PWR 21 /* power of 2 for the maximum size class */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
 
 /* Pack a size and allocated bit into a word */
-#define PACK(size, alloc)  ((size) | (alloc)) 
+/* last 2 bits: 0x1 -- prev free, curr alloc */
+/*              0x2 -- prev alloc, curr free */
+/*              0x3 -- prev alloc, curr alloc*/
+/*              0x0 -- prev free, curr free  */
+#define PACK(size, prev_alloc, alloc)  ((size) | (prev_alloc << 1) | (alloc)) 
 
 /* Read and write a word at address p */
 #define GET(p)       (*(unsigned int *)(p))            
@@ -73,7 +82,8 @@
 
 /* Read the size and allocated fields from address p */
 #define GET_SIZE(p)  (GET(p) & ~0x7)                   
-#define GET_ALLOC(p) (GET(p) & 0x1)                    
+#define GET_ALLOC(p) (GET(p) & 0x1)
+#define GET_PREV_ALLOC(p) ((GET(p) & 0x2) >> 1)                    
 
 /* Given block ptr bp, compute address of its header and footer */
 #define HDRP(bp)       ((char *)(bp) - WSIZE)                     
@@ -86,6 +96,9 @@
 /* Read and write a pointer at an address (64-bit) */
 #define GET_PTR(addr) ((void *)(*(long *)(addr)))
 #define PUT_PTR(addr, ptr) (*(long *)(addr) = (long)ptr)
+
+/* Get the payload a block can provide */
+#define GET_PAYLOAD(bp) (GET_SIZE(HDRP(bp)) - WSIZE)
 
 /* Global variables */
 static void *heap_listp = 0;
@@ -131,9 +144,9 @@ int mm_init(void) {
 
 	/* Add prologue and epilogue */
 	PUT(heap_listp, 0); /* Zero padding */
-	PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1)); /* Prologue header */
-	PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
-	PUT(heap_listp + (3*WSIZE), PACK(0, 1)); /* Epilogue header */
+	PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1, 1)); /* Prologue header */
+	PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1, 1)); /* Prologue footer */
+	PUT(heap_listp + (3*WSIZE), PACK(0, 1, 1)); /* Epilogue header */
 	heap_listp += (2*WSIZE);
 
 	/* Extend the empty heap with a CHUNKSIZE bytes */
@@ -158,10 +171,10 @@ void *malloc (size_t size) {
 		return NULL;
 
 	/* Adjust block size to include overhead and alignment reqs */
-	if (size <= DSIZE)
+	if (size <= (DSIZE + WSIZE))
 		asize = MIN_BLK_SIZE;
 	else
-		asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
+		asize = DSIZE * ((size + (WSIZE) + (DSIZE-1)) / DSIZE);
 
 	// printf("line %d: malloc %lu bytes for requested %lu bytes\n", __LINE__, asize, size);
 
@@ -197,13 +210,9 @@ void free (void *bp) {
 	/* get the allocated block size */
 	size_t size = GET_SIZE(HDRP(bp));
 
-	if (heap_listp == 0){
-		mm_init();
-	}
-
 	/* free the block */
-	PUT(HDRP(bp), PACK(size, 0));
-	PUT(FTRP(bp), PACK(size, 0));
+	PUT(HDRP(bp), PACK(size, GET_PREV_ALLOC(HDRP(bp)), 0));
+	PUT(FTRP(bp), PACK(size, GET_PREV_ALLOC(HDRP(bp)), 0));
 
 	/* coalesce with any ajacent blocks */
 	bp = coalesce(bp);
@@ -275,9 +284,12 @@ static void *extend_heap(size_t words) {
 	if ((long)(bp = mem_sbrk(size)) == -1)
 		return NULL;
 	/* Initialize free block header/footer and epilogue header */
-	PUT(HDRP(bp), PACK(size, 0)); /* free block header */
-	PUT(FTRP(bp), PACK(size, 0)); /* free block footer */
-	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* new epilogue header */
+	/* free block header */
+	PUT(HDRP(bp), PACK(size, GET_PREV_ALLOC(HDRP(bp)), 0)); 
+	/* free block footer */
+	PUT(FTRP(bp), PACK(size, GET_PREV_ALLOC(HDRP(bp)), 0));
+	/* new epilogue header */ 
+	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 0, 1)); 
 
 	/* Coalesce if previous block is free */
 	return coalesce(bp);
@@ -291,7 +303,7 @@ static void *extend_heap(size_t words) {
  *
  */
 static void *coalesce(void *bp) {
-	size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+	size_t prev_alloc = GET_PREV_ALLOC(HDRP(bp));
 	size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
 	size_t size = GET_SIZE(HDRP(bp));
 
@@ -305,8 +317,8 @@ static void *coalesce(void *bp) {
 		/* delete next block from its list */
 		deleteBlk(NEXT_BLKP(bp));
 		/* coalesce with next */
-		PUT(HDRP(bp), PACK(size, 0));
-		PUT(FTRP(bp), PACK(size, 0));
+		PUT(HDRP(bp), PACK(size, 1, 0));
+		PUT(FTRP(bp), PACK(size, 1, 0));
 	}
 	/* prev free and next allocated */
 	else if (!prev_alloc && next_alloc) {
@@ -314,8 +326,8 @@ static void *coalesce(void *bp) {
 		/* delete prev block from its list */
 		deleteBlk(PREV_BLKP(bp));
 		/* coalesce with prev */
-		PUT(FTRP(bp), PACK(size, 0));
-		PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+		PUT(FTRP(bp), PACK(size, 1, 0));
+		PUT(HDRP(PREV_BLKP(bp)), PACK(size, 1, 0));
 		bp = PREV_BLKP(bp);
 	}
 	/* both sieds free */
@@ -326,8 +338,8 @@ static void *coalesce(void *bp) {
 		deleteBlk(NEXT_BLKP(bp));
 		deleteBlk(PREV_BLKP(bp));
 		/* coalesce with both sides */
-		PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-		PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+		PUT(HDRP(PREV_BLKP(bp)), PACK(size, 1, 0));
+		PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 1, 0));
 		bp = PREV_BLKP(bp);
 	}
 	insertBlk(bp);
@@ -437,19 +449,19 @@ static void place(void *bp, size_t asize) {
 	// printLists();
 	if ((csize - asize) >= MIN_BLK_SIZE) {
 		/* allocate requested block */
-		PUT(HDRP(bp), PACK(asize, 1));
-		PUT(FTRP(bp), PACK(asize, 1));
+		PUT(HDRP(bp), PACK(asize, 1, 1));
+		PUT(FTRP(bp), PACK(asize, 1, 1));
 		/* split the block */
 		bp = NEXT_BLKP(bp);
-		PUT(HDRP(bp), PACK(csize-asize, 0));
-		PUT(FTRP(bp), PACK(csize-asize, 0));
+		PUT(HDRP(bp), PACK(csize-asize, 1, 0));
+		PUT(FTRP(bp), PACK(csize-asize, 1, 0));
 		/* insert splitted free block back to appropriate list */
 		insertBlk(bp);
 	} 
 	else {
 		/* fill the whole block */
-		PUT(HDRP(bp), PACK(csize, 1));
-		PUT(FTRP(bp), PACK(csize, 1));
+		PUT(HDRP(bp), PACK(csize, 1, 1));
+		PUT(FTRP(bp), PACK(csize, 1, 1));
 	}
 } 
 
@@ -458,7 +470,7 @@ static void place(void *bp, size_t asize) {
  * return an address storing 1st free block of the appropriate list
  */
 static void *hashBlkSize(size_t asize) {
-	return (free_lists_base + (mm_log2(asize)-4) * DSIZE);
+	return (free_lists_base + MAX((mm_log2(asize)-MIN_PWR), 0) * DSIZE);
  }
 
 /*
@@ -469,7 +481,7 @@ static void *hashBlkSize(size_t asize) {
 static size_t mm_log2(size_t n) {
 	size_t count = 0;
 	n >>=1; 
-	while (n && count < 20) {
+	while (n && count < MAX_PWR) {
 		count++;
 		n >>= 1;
 	}
