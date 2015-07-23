@@ -125,7 +125,7 @@ static void printRaw(int lineno);
 static int in_heap(const void *p);
 /*
  * Initialize: return -1 on error, 0 on success.
- * Initial heap: 29 size class pointers + proplogue + epilogue
+ * Initial heap: 17 size class pointers + proplogue + epilogue
  */
 int mm_init(void) {
 	int i;
@@ -152,7 +152,7 @@ int mm_init(void) {
 	/* Extend the empty heap with a CHUNKSIZE bytes */
 	if ((bp = extend_heap(CHUNKSIZE/WSIZE)) == NULL)
 		return -1;
-	// printRaw(__LINE__);
+
     return 0;
 }
 
@@ -176,16 +176,9 @@ void *malloc (size_t size) {
 	else
 		asize = DSIZE * ((size + (WSIZE) + (DSIZE-1)) / DSIZE);
 
-	// printf("line %d: malloc %lu bytes for requested %lu bytes\n", __LINE__, asize, size);
-	// printHeap(__LINE__);
-	// printLists(__LINE__);
-
 	/* Search free lists for a fit */
 	if ((bp = find_fit(asize)) != NULL) {
-		// mm_checkheap(__LINE__);
-		// printf("line %d: find a fit!\n", __LINE__);
 		place(bp, asize);
-		// mm_checkheap(__LINE__);
 		return bp;
 	}
 
@@ -193,11 +186,8 @@ void *malloc (size_t size) {
 	extendsize = MAX(asize, CHUNKSIZE);
 	if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
 		return NULL;
-	// printf("place malloc request at block %p with size %u\n", bp, GET_SIZE(HDRP(bp)));
 	place(bp, asize);
-	// printf("after place\n");
-	// mm_checkheap(__LINE__);
-	// printRaw(__LINE__);
+
 	return bp;
 }
 
@@ -209,8 +199,6 @@ void free (void *bp) {
 
 	if (bp == 0)
 		return;
-
-	// printf("line %d: free %p with size %u \n", __LINE__, bp, GET_SIZE(HDRP(bp)));
 
 	/* get the allocated block size */
 	size_t size = GET_SIZE(HDRP(bp));
@@ -224,7 +212,7 @@ void free (void *bp) {
 
 	/* coalesce with any ajacent blocks */
 	bp = coalesce(bp);
-	// mm_checkheap(__LINE__);
+
 }
 
 /*
@@ -300,7 +288,6 @@ static void *extend_heap(size_t words) {
 	PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 0, 1));
 
 	/* Coalesce if previous block is free */
-	dbg_printf("leaving extend_heap\n");
 	return coalesce(bp);
 }
 
@@ -316,8 +303,6 @@ static void *coalesce(void *bp) {
 	size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
 	size_t size = GET_SIZE(HDRP(bp));
 
-	dbg_printf("in coalesce, coalesce %p...\n", bp);
-
 	/* both sides allocated */
 	if (prev_alloc && next_alloc) {
 		;
@@ -325,7 +310,6 @@ static void *coalesce(void *bp) {
 	/* prev allocated but next free */
 	else if (prev_alloc && !next_alloc) {
 		size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-		dbg_printf("coalesce blk %p with next %p\n", bp, NEXT_BLKP(bp));
 		/* delete next block from its list */
 		deleteBlk(NEXT_BLKP(bp));
 		/* coalesce with next */
@@ -355,7 +339,6 @@ static void *coalesce(void *bp) {
 		bp = PREV_BLKP(bp);
 	}
 	insertBlk(bp);
-	dbg_printf("leaving coalesce...\n");
 	return bp;
 
 }
@@ -371,7 +354,6 @@ static void deleteBlk(void *bp) {
 	unsigned int next = GET(bp+WSIZE);
 	void *array_ptr = 0;
 
-	dbg_printf("in delete... delete %p\n", bp);
 	/* have both prev/next free blocks */
 	if (prev && next) {
 		PUT(itop(prev)+WSIZE, next); /* bp's prev points to bp's next */
@@ -392,7 +374,6 @@ static void deleteBlk(void *bp) {
 		array_ptr = hashBlkSize(GET_SIZE(HDRP(bp)));
 		PUT_PTR(array_ptr, 0); /* head of this list become NULL */
 	}
-	dbg_printf("leaving delete...\n");
 }
 /*
  * insert free block into appropriate lists
@@ -403,10 +384,8 @@ static void insertBlk(void *bp) {
 	void *array_ptr;
 	void *head_bp;
 
-	dbg_printf("in insert... insert %p\n", bp);
-
 	array_ptr = hashBlkSize(GET_SIZE(HDRP(bp)));
-	dbg_printf("lists pointer array index %u.\n", (array_ptr-free_lists_base)/DSIZE);
+
 	/* at least one free block already in the list */
 	if ((head_bp = GET_PTR(array_ptr))) {
 		PUT(bp, 0); /* set bp's prev */
@@ -415,14 +394,11 @@ static void insertBlk(void *bp) {
 	}
 	/* the list is empty */
 	else {
-		dbg_printf("insert in empty list...\n");
 		PUT(bp, 0); /* set bp's prev */
 		PUT(bp+WSIZE, 0); /* set bp's next */
 	}
-	// printf("%p's prev %p, next %p\n", bp, get_prev_free_bp(bp), get_next_free_bp(bp));
+	
 	PUT_PTR(array_ptr, bp); /* reset the head to be bp */
-	// mm_checkheap(__LINE__);
-	dbg_printf("leaving insert...\n");
 }  
 
 /*
@@ -441,14 +417,12 @@ static void *find_fit(size_t asize) {
 		bp = GET_PTR(array_ptr);
 		while (bp) {	
 			if (GET_SIZE(HDRP(bp)) >= asize) {
-				dbg_printf("get a block of size %u.\n", GET_SIZE(HDRP(bp)));
 				return bp;
 			}
 			bp = get_next_free_bp(bp);
 		}
 	}
 	/* fit not found */
-	dbg_printf("No fit found!\n");
 	return NULL;
 }
 
@@ -463,7 +437,6 @@ static void place(void *bp, size_t asize) {
 
 	/* delete the free block from list */
 	deleteBlk(bp);
-	dbg_printf("in place after delete\n");
 
 	if ((csize - asize) >= MIN_BLK_SIZE) {
 		/* allocate requested block */
@@ -612,9 +585,10 @@ void mm_checkheap(int lineno) {
 	}
 	/* check each free block's header and footer */
 	/* check minimum block size */
-	/* check prev_alloc state of current blk match alloc state of previous blk */
+	/* check current blk's prev_alloc match previous blk's alloc state */
 	bp_prev = heap_listp;
-	for (bp = NEXT_BLKP(heap_listp); GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+	bp = NEXT_BLKP(heap_listp);
+	for (; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
 		hdrp = HDRP(bp);
 		if (!GET_ALLOC(hdrp)) {
 			ftrp = FTRP(bp);
@@ -636,7 +610,8 @@ void mm_checkheap(int lineno) {
 			exit(1);
 		}
 		if (GET_PREV_ALLOC(hdrp) != GET_ALLOC(HDRP(bp_prev))) {
-			printf("line %d: curr's prev_alloc not match prev's alloc!\n", lineno);
+			printf("line %d: curr's prev_alloc not match prev's alloc!\n", 
+				    lineno);
 			printf("curr %p 's prev_alloc %d\n", bp, GET_PREV_ALLOC(hdrp));
 			printf("prev %p 's alloc %d\n", bp_prev, GET_ALLOC(HDRP(bp_prev)));
 			printHeap(lineno);
@@ -738,7 +713,8 @@ void mm_checkheap(int lineno) {
 			if (blk_size < (unsigned int)(1 << power) || 
 				blk_size > (unsigned int)(1 << (power+1))) {
 				printf("line %d: block not within list size range!\n", lineno);
-				printf("class size: %u, block size %u\n", (1<<power), blk_size);
+				printf("class size: %u, block size %u\n", 
+					   (1<<power), blk_size);
 				printLists(lineno);
 				exit(1);
 			}
@@ -759,7 +735,7 @@ static void printRaw(int lineno) {
 	for (bp = mem_heap_lo(); bp < (mem_heap_hi()+1); bp+=WSIZE) {
 		printf("[%u]", GET(bp));
 	}
-	printf("\n-------------------------------------------------------------\n");
+	printf("\n------------------------------------------------------------\n");
 }
 
 /*
