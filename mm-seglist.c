@@ -490,18 +490,17 @@ static void place(void *bp, size_t asize) {
  * return an address storing 1st free block of the appropriate list
  */
 static void *hashBlkSize(size_t asize) {
-	return (free_lists_base + MAX((mm_log2(asize)-MIN_PWR), 0) * DSIZE);
+	return (free_lists_base + mm_log2(asize) * DSIZE);
  }
 
 /*
- * return log2(n), truncate fractional part
- * e.g. log2(2^4) = 4, log2(2^5-1) = 4
- * max power is 20
+ * return log2(n) offseted by MIN_PWR, truncate fractional part
+ * e.g. log2(2^4) = 0, log2(2^5+1) = 1 
  */
 static size_t mm_log2(size_t n) {
 	size_t count = 0;
-	n >>=1; 
-	while (n && count < MAX_PWR) {
+	n >>= 5; 
+	while (n && count < 16) {
 		count++;
 		n >>= 1;
 	}
